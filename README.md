@@ -1,0 +1,2 @@
+# Garch model in Julia
+
