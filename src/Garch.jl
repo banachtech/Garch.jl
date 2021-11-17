@@ -1,7 +1,6 @@
 module Garch
 
-using Random, Distributions, Statistics, Optim, Parameters
-Random.seed!(1234)
+using Random, Statistics, Optim, Parameters
 
 export Std, GJR, fit!, simulate!, predict!
 
