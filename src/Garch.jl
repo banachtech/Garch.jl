@@ -1,94 +1,122 @@
-"""
-Fit Garch model to financial data.
-"""
 module Garch
 
-using Random, Turing, Distributed, MCMCChains, Distributions, Statistics, StatsBase, LinearAlgebra, Optim, NLSolversBase
+using Random, Distributions, Statistics, Optim, Parameters
+Random.seed!(1234)
 
-export simulate, garch, garchZD, fitBayes, fitMLE
+export Std, GJR, fit!, simulate!, predict!
 
-"""
-    simulate(a, b, c; y₀=0.001, h₀=0.0, n=100, d=Normal(0., 1.))
-
-Simulate Garch(1,1) process:
-`rₜ = √hₜ ξₜ`
-`hₜ = a + b yₜ² + c hₜ₋₁`
-
-"""
-function simulate(a, b, c; y₀=0.001, h₀=0.0, n=100, d=Normal(0., 1.))
-    @assert c >= 0 && a >= 0 && b > 0 "a,c shoud be >=0, b > 0"
-	h = fill(0., n)
-	y = similar(h)
-	y[1] = y₀
-	ξ = rand(d, n - 1)
-	for i = 2:n
-		h[i] = c + a * y[i - 1] * y[i - 1] + b * h[i - 1]
-		y[i] = ξ[i - 1] * √h[i]
-	end
-	return y, h
+@with_kw mutable struct Std
+    @deftype Float64
+    σ = 0.01
+    @assert σ > 0.0
+    μ₁ = rand()
+    @assert μ₁ > 0.0 && μ₁ < 1.0
+    μ₂ = rand()
+    @assert μ₂ > 0.0 && μ₂ < 1.0
 end
 
-"""
-    garchZD(y::Vector{Float64})
-
-Model Zero drift Garch(1,1) process for Bayesian estimation.
-"""
-@model function garchZD(y)
-	n = length(y)
-	h = 0.0
-	a ~ Uniform(0.0001, 1)
-	b ~ Uniform(0.0, 1)
-	y[1] ~ Normal(y[1], h)
-	for i = 2:n
-		h = a * y[i - 1] * y[i - 1] + b * h
-		y[i] ~ Normal(0, √h)
-	end
+@with_kw mutable struct GJR
+    @deftype Float64
+    σ = 0.01
+    @assert σ > 0.0
+    μ₁ = rand()
+    @assert μ₁ > 0.0 && μ₁ < 1.0
+    μ₂ = rand()
+    @assert μ₂ > 0.0 && μ₂ < 1.0
+    μ₃ = rand()
+    @assert μ₃ > 0.0 && μ₃ < 1.0
+    isdown::Bool = true
 end
 
-"""
-    garch(y::Vector{Float64})
-
-Model Garch(1,1) for Bayesian estimation.
-"""
-@model function garch(y)
-	n = length(y)
-	h = 0.01
-	a ~ Uniform(0.0001, 1.0)
-	b ~ Uniform(0.0001, 1.0)
-	w ~ Uniform(0.0, 1.0)
-	y[1] ~ Normal(y[1], h)
-	for i = 2:n
-		h = w + a * y[i - 1] * y[i - 1] + b * h
-		y[i] ~ Normal(0, √h)
-	end
+function nll(z, σ, rt)
+    μ₁, μ₂ = exp.(-exp.(-z))
+    ll = 0.0
+    n = length(rt)
+    σ² = σ * σ
+    h = σ²
+    μ = 1.0 - μ₂
+    for t ∈ 2:n
+        h = σ² + μ₁ * (μ₂ * h + μ * rt[t-1] * rt[t-1] - σ²)
+        if h > 0.0
+            ll += 0.5 * (log(h) + rt[t] * rt[t] / h)
+        end
+    end
+    return ll
 end
 
-"""
-    fitMLE(x::Vector{Float64}; isZD=true)
-
-Fit Garch(1,1) on `x` using Maximum Likelihood estimation.
-"""
-function fitMLE(x; isZD=true)
-	model = isZD ? garchZD(x) : garch(x)
-	out = optimize(model, MLE())
-    m, s = coef(out), stderror(out)
-	return (pars = m, serr = s)
+function nll(z, σ, rt, J)
+    μ₁, μ₂, μ₃ = exp.(-exp.(-z))
+    ll = 0.0
+    n = length(rt)
+    σ² = σ * σ
+    h = σ²
+    for t ∈ 2:n
+        h = σ² + μ₁ * ((1.0 - μ₂ + 2.0 * (μ₂ - μ₃) * J[t-1]) * rt[t-1] * rt[t-1] + μ₃ * h - σ²)
+        if h > 0.0
+            ll += 0.5 * (log(h) + rt[t] * rt[t] / h)
+        end
+    end
+    return ll
 end
 
-"""
-    fitBayes(x::Vector{Float64}; isZD=true, nchains=4, nsims=1000, isDistributed=false)
 
-Fit Garch(1,1) on `x` using Bayesian MCMC.
-"""
-function fitBayes(x; isZD=true, nchains=4, nsims=1000, isDistributed=false)
-	model = isZD ? garchZD(x) : garch(x)
-	if isDistributed
-		chn = sample(model, NUTS(0.65), MCMCDistributed(), nsims, nchains, progress=false)
-	else
-		chn = sample(model, sampler, nsims, progress=false)
-	end
-	return chn
+function fit!(model::GJR, x::Vector{Float64}; time_limit = 60.0, solver = NelderMead(), g_tol = 1.0e-6)
+    @unpack σ, μ₁, μ₂, μ₃, isdown = model
+    σ = std(x)
+    J = 1.0 .* (isdown ? (x .< 0.0) : (x .> 0.0))
+    p = [-log(-log(μ₁)), -log(-log(μ₂)), -log(-log(μ₃))]
+    p0 = 4.0 .* rand(3)
+    res = optimize(p -> nll(p, σ, x, J), p0, solver, Optim.Options(time_limit = time_limit, g_tol = g_tol))
+    μ₁, μ₂ = exp.(-exp.(-res.minimizer))
+    @pack! model = σ, μ₁, μ₂, μ₃, isdown
+    return res
 end
 
+
+function fit!(model::Std, x::Vector{Float64}; time_limit = 60.0, solver = NelderMead(), g_tol = 1.0e-6)
+    @unpack σ, μ₁, μ₂ = model
+    σ = std(x)
+    p = [-log(-log(μ₁)), -log(-log(μ₂))]
+    p0 = 4.0 .* rand(2)
+    res = optimize(p -> nll(p, σ, x), p0, solver, Optim.Options(time_limit = time_limit, g_tol = g_tol))
+    μ₁, μ₂ = exp.(-exp.(-res.minimizer))
+    @pack! model = σ, μ₁, μ₂
+    return res
+end
+
+
+function simulate(model::Std, pathlen::Integer; r0 = 0.0)
+    r = fill(0.0, pathlen + 1)
+    r[1] = r0
+    @unpack σ, μ₁, μ₂ = model
+    σ² = σ * σ
+    h = σ²
+    μ = 1.0 - μ₂
+    for t ∈ 1:pathlen
+        h = max(0.0, σ² + μ₁ * (μ₂ * h + μ * r[t] * r[t] - σ²))
+        r[t+1] = √h * randn()
+    end
+    return r[2:end]
+end
+
+function simulate(model::GJR, pathlen::Integer; r0 = 0.0)
+    r = fill(0.0, pathlen + 1)
+    r[1] = r0
+    @unpack σ, μ₁, μ₂, μ₃, isdown = model
+    σ² = σ * σ
+    h = σ²
+    for t ∈ 1:pathlen
+        J = isdown ? (r[t] < 0.0) : (r[t] > 0.0)
+        h = max(σ² + μ₁ * ((1.0 - μ₂ + 2.0 * (μ₂ - μ₃) * J) * r[t] * r[t] + μ₃ * h - σ²), 0.0)
+        r[t+1] = √h * randn()
+    end
+    return r[2:end]
+end
+
+function predict(model::Union{GJR,Std}, paths::Integer, pathlen::Integer)
+    vol = fill(0.0, paths)
+    vol .= [std(simulate(model, pathlen, r0 = 0.0)) for i ∈ 1:paths]
+    return vol
+end
 
 end

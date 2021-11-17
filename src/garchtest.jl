@@ -1,19 +1,14 @@
-using Turing, StatsBase, MCMCChains, CSV, DataFrames
-using Garch
 
-# generate fake data
-x, h = Garch.simulate(0.5, 0.7, 0.0, n=1000)
+using CSV, DataFrames, Plots, Statistics
+df = DataFrame(CSV.File("data/btc.csv"))
+x = log.(df.cl[2:2001]) .- log.(df.cl[1:2000])
+x .= x .- mean(x)
 
-# fit Garch(1,1) with mle
-mle_fit = Garch.fitMLE(x, isZD=false)
-mle_fit.pars ./ mle_fit.serr
+m1 = Std()
+m2 = GJR()
 
-# load btc data
-btc = DataFrame(CSV.File("data/btc.csv", missingstrings=["NaN",""," "]))
-dropmissing!(btc)
-btc = log.(btc[2:end]) .- log.(btc[1:end - 1])
-btc .= btc .- mean(btc)
+res1 = fit!(m1, x)
+res2 = fit!(m2, x)
 
-# fit Garch(1,1) with mle
-btcfit = Garch.fitMLE(btc[1:1000])
-
+v1 = predict(m1, 200, 240)
+v2 = predict(m2, 200, 240)
