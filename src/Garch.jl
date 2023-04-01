@@ -66,7 +66,7 @@ function fit!(model::GJR, x::Vector{Float64}; time_limit = 60.0, solver = Nelder
     p = [-log(-log(μ₁)), -log(-log(μ₂)), -log(-log(μ₃))]
     p0 = 4.0 .* rand(3)
     res = optimize(p -> nll(p, σ, x, J), p0, solver, Optim.Options(time_limit = time_limit, g_tol = g_tol))
-    μ₁, μ₂ = exp.(-exp.(-res.minimizer))
+    μ₁, μ₂, μ₃ = exp.(-exp.(-res.minimizer))
     @pack! model = σ, μ₁, μ₂, μ₃, isdown
     return res
 end
